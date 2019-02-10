@@ -1,65 +1,80 @@
 '''
-verison3: 使用一个RequestHandler类来统一处理request handler函数关于提取request信息的需求，这样handler函数只需要直接写业务有关的代码即可。
-需要注意的是，这样处理后handler函数的参数名就不能随便定义，
-必须和request里对应的名字一样，另外如果需要request请求作为参数，就必须写成request，否则RequestHandler类认不出来。
+version4： 优化RequestHandler类
+
+1.之前只考虑get方法，没有考虑post方法，区分处理get，post方法，并把从他们中获取的值赋给kw （kw是一个dict）
+------------------------------------------------------------------------------------------------------------------------
+1.1 获取post方法里的数据 - 一般post的数据都是放到body里
+To access form data with "POST" method use Request.post() or Request.multipart().
+
+Request.post() accepts both 'application/x-www-form-urlencoded' and 'multipart/form-data' form’s data encoding .
+It stores files data in temporary directory.
+If client_max_size is specified post raises ValueError exception.
+For efficiency use Request.multipart(), It is especially effective for uploading large files (File Uploads).
+
+-》也就是，如果是request.content_type是application/x-www-form-urlencoded' 或者 'multipart/form-data ：
+用request.post方法获取body数据
+
+-》如果request.content_type是application/json，则把request转成json数据类型
+用request.json方法（Read request body decoded as json.）
+
+1.2 获取get方法里的数据 - 一般get的数据都是放在query_string里
+-》用request.query_string 获取
+
+-》然后用urllib.parse.parse_qs函数分析URL中query组件的参数，返回一个key-value对应的字典格式
+关于urllib.parse.parse_qs的例子：
+
+import urllib.parse
+print(urllib.parse.parse_qs("FuncNo=9009001&username=1"))
+输出结果：
+{'FuncNo': ['9009001'], 'username': ['1']}
 
 
-#问题：
-request handler 函数，主要就是从request中获取需要的参数值，然后进行处理后返回一个web.response对象。
+2.path路径里可能会有一些变量，获取path的变量值，并赋给kw （kw是一个dict）
+------------------------------------------------------------------------------------------------------------------------
+比如我们的hello方法对应的path是'/hello/{name}'，里面的name就是变量
 
-比如我们定义的hello方法，里面就需要从request里提取match_info中name的值。
-text = '<h1>hello, %s!</h1>' % request.match_info['name']
-也就是说，如果我们有很多个request handler函数，并且不同的handler函数需要提取不同的request里的信息，那每个handler函数都需要写一堆提取request里信息的代码
+-》我们用request.match_info方法获取变量值
+Resource may have variable path also. For instance, a resource with the path '/a/{name}/c' would match all incoming requests with paths such as '/a/b/c', '/a/1/c', and '/a/etc/c'.
 
-#解决思路：
-定义一个函数，输入是不同的handler函数，然后根据不同handler函数的需求提取需要的request的信息，然后作为参数传给handler函数，输出是handler函数的返回值
+A variable part is specified in the form {identifier}, where the identifier can be used later in a request handler to access the matched value for that part. This is done by looking up the identifier in the Request.match_info mapping:
 
-#具体步骤：
-1.为了表明handler函数需要哪些request的值，我们就把需要的值的名字作为handler函数的参数名。比如hello函数就把name作为参数名。
-async def hello(request, *, name): #需要是async，否则报错object bytes can't be used in 'await' expression
-await asyncio.sleep(0.5)
-text = '<h1>hello, %s!</h1>' % name
-return web.Response(body=text.encode('utf-8'), content_type='text/html')
+@routes.get('/{name}')
+async def variable_handler(request):
+    return web.Response(
+        text="Hello, {}".format(request.match_info['name']))
 
-2.定义一个RequestHandler类，为什么用类，我们之后会讲解。然后这个类的传入的参数是handler函数，遍历这个函数，知道他需要哪些参数，把这些参数存到args里，args是一个tuple
-args = []
-params = inspect.signature(self.fn).parameters
-for name, param in params.items():
-if param.kind == inspect.Parameter.KEYWORD_ONLY:
-args.append(name)
-args = tuple(args)
+3.代码中涉及到好几处的函数参数种类判断以及函数参数名提取，把他们独立出来处理
+------------------------------------------------------------------------------------------------------------------------
+-》函数参数种类判断
+has_named_kw_args(fn) 是否有命名关键字参数keyword_only
+has_var_kw_arg(fn) 是否有关键字参数var_keyword
+has_request_arg(fn) 是否有参数名为request的参数
 
-3.handler函数可能需要的参数值下面几种，把这些值全部赋值给kw，kw是一个dict（参数名和对应的参数值）：
+-》函数参数名提取
+get_required_kw_args(fn) 没有默认值，必须传入值的命名关键字参数
+get_named_kw_args(fn)所有的命名关键字参数名，包括有默认值的
 
-参数来自于reqeust.query_string
-参数来自于request.match_info
-request参数
+-》用处
+1):if self._has_var_kw_arg or self._has_named_kw_args or self._required_kw_args:
+只要有这三个中任意一种参数，我们就需要从request中获取参数值传入。
 
-4.把kw的值和args比较，如果是handler函数需要的参数则留下了
+2):if not self._has_var_kw_arg and self._named_kw_args:
+如果没有关键字参数，可是有命名关键字参数
+把命名关键字参数，和kw（从requst中获得数据）进行对比，去除kw中不属于命名关键字参数的部分。也就是kw只留handler函数需要的参数值。
 
-5.把kw传给handler函数，返回handler函数的返回值
+3):if self._has_request_arg:
+如果有参数名为request的参数，则传给kw
 
-#说明：
-我们之所以选择类，是因为我们将用RequestHandler代替handler传给add_route
-app.router.add_route('GET', '/',RequestHandler(app, index))
-
-add_route 方法对它的第三个参数的要求是：
-1.需要是coroutine的函数
-2.同时只能接收一个参数也就是request
-
-可是我们又需要传入handler函数作为参数，之后才能对不同的handler函数进行处理，所以我们选择用类。
-一方面类的__init__方法允许我们传入handler函数作为参数，
-另一方面类的__call__方法可以让RequestHandler类像普通handler函数一样接收request参数被调用
-
-async def __call__(self, request): #注意：使用coroutine
-r = await self.fn(*args)
+4): if self._required_kw_args:
+            for name in self._required_kw_args:
+                if not name in kw:
+如果有需要传入值的参数，可是kw中却不存在这个参数对应的值，则抛出错误
 
 '''
-
-
 import asyncio
 from aiohttp import web
 
+# 1.handler 函数
 async def index(request):
     await asyncio.sleep(0.5)
     return web.Response(body=b'<h1>Index</h1>', content_type='text/html')
@@ -69,53 +84,145 @@ async def hello(request, *, name):  #需要是async，否则报错object bytes c
     text = '<h1>hello, %s!</h1>' % name
     return web.Response(body=text.encode('utf-8'), content_type='text/html')
 
+# 2.RequestHandler class start
 from urllib import parse
-import inspect
+import inspect,logging
+
+#2.1 把必须传入值的命名关键字参数名放到一个tuple里返回
+def get_required_kw_args(fn):
+    args = []
+    params = inspect.signature(fn).parameters
+    for name, param in params.items():
+        if param.kind == inspect.Parameter.KEYWORD_ONLY and param.default == inspect.Parameter.empty:
+            args.append(name)
+    return tuple(args)
+
+#2.2 把所有命名关键字参数名放到一个tuple里返回 （包括有些以及由默认值的命名关键字参数）
+def get_named_kw_args(fn):
+    args = []
+    params = inspect.signature(fn).parameters
+    for name, param in params.items():
+        if param.kind == inspect.Parameter.KEYWORD_ONLY:
+            args.append(name)
+    return tuple(args)
+
+#2.3 handler函数的参数中是否有命名关键字参数
+def has_named_kw_args(fn):
+    params = inspect.signature(fn).parameters
+    for name, param in params.items():
+        if param.kind == inspect.Parameter.KEYWORD_ONLY:
+            return True
+
+#2.4 handler函数的参数中是否有可变参数
+def has_var_kw_arg(fn):
+    params = inspect.signature(fn).parameters
+    for name, param in params.items():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+
+#2.5 handler函数中是否有一个名为request的参数
+def has_request_arg(fn):
+    sig = inspect.signature(fn)
+    params = sig.parameters
+    found = False
+    for name, param in params.items():
+        if name == 'request':
+            found = True
+            continue
+        if found and (param.kind != inspect.Parameter.VAR_POSITIONAL and param.kind != inspect.Parameter.KEYWORD_ONLY and param.kind != inspect.Parameter.VAR_KEYWORD):
+            raise ValueError('request parameter must be the last named parameter in function: %s%s' % (fn.__name__, str(sig)))
+    return found
+
+# 3.定义RequestHandler类
 class RequestHandler(object):
+
+#3.1 初始化类，把web.application实例以及handler函数传进来
     def __init__(self, app, fn):
-        self.app = app
-        self.fn = fn
+        self._app = app
+        self._func = fn
+        self._has_request_arg = has_request_arg(fn)
+        self._has_var_kw_arg = has_var_kw_arg(fn)
+        self._has_named_kw_args = has_named_kw_args(fn)
+        self._named_kw_args = get_named_kw_args(fn)
+        self._required_kw_args = get_required_kw_args(fn)
 
+#3.2 定义一个__call__方法，因为add_route里需要它是一个coroutine，而且只有一个参数request。所以把它写成coroutine，await handler函数
+#调用add_route的时候会把request值传给__call__
     async def __call__(self, request):
-        # 1.获取URI函数的所有关键字参数名
-        args = []
-        params = inspect.signature(self.fn).parameters
-        for name, param in params.items():
-            if param.kind == inspect.Parameter.KEYWORD_ONLY:
-                args.append(name)
-        args = tuple(args)
-
-        #定义一个kw是一个dict，初始值为None，用来存放URI的参数以及对应的值
+        #3.2.1 初始化kw，之后会把所有的request包含的data，path里的变量信息，还有request值都传给kw，kw是一个dict，然后kw只留handler函数需要的值，把kw传给handler函数执行
         kw = None
+        #3.2.2 如果有可变参数，命名关键字参数，或者有必须传入值的参数，则从request中获取data
+        if self._has_var_kw_arg or self._has_named_kw_args or self._required_kw_args:
+            #判断是否是Post方法
+            if request.method == 'POST':
+                #1.如果没有content_type则报错
+                if not request.content_type:
+                    return web.HTTPBadRequest('Missing Content-Type.')
 
-        # 2.从request中获得需要的参数值赋值给kw
-        # 2.1 从request中获取所有query string的值 比如/hello?name='jack'， 则得到的kw值为dict{('name':'jack'}
-        qs = request.query_string
-        if qs:
-            kw = dict()
-            for k, v in parse.parse_qs(qs, True).items():
-                kw[k] = v[0]
+                #2.如果content_type是json类型，则把request转成json类型赋值给kw
+                ct = request.content_type.lower()
+                if ct.startswith('application/json'):
+                    params = await request.json()
+                    if not isinstance(params, dict):
+                        return web.HTTPBadRequest('JSON body must be object.')
+                    kw = params
 
-        # 2.2 如果query_string为空则获取match_info的值比如/hello/{name}，则得到kw值为dict {('name':'lucy'}
+                #3.如果是'application/x-www-form-urlencoded'或'multipart/form-data'，则把post的body的data传给kw
+                elif ct.startswith('application/x-www-form-urlencoded') or ct.startswith('multipart/form-data'):
+                    params = await request.post()
+                    kw = dict(**params)
+                else:
+                    return web.HTTPBadRequest('Unsupported Content-Type: %s' % request.content_type)
+
+            #判断是否是get方法，则从query_string中获取值转换成键值对，然后赋值给kw
+            if request.method == 'GET':
+                qs = request.query_string
+                if qs:
+                    kw = dict()
+                    for k, v in parse.parse_qs(qs, True).items():
+                        kw[k] = v[0]
+
+        #3.2.3 如果request里没有data，则把request的match_info（也就是变量信息）传给kw
         if kw is None:
             kw = dict(**request.match_info)
 
-        # 3.比较URI函数的需要的参数是否在kw中，如果在则提取出来
-        copy = dict()
-        for name in args:
-            if name in kw:
-                copy[name] = kw[name]
-        kw = copy
+        #3.2.4 如果request里有data，则对比kw里的变量名和handler函数里的参数名，只留handler函数需要的参数值，然后把request的match_info（也就是变量信息）传给kw
+        else:
+            if not self._has_var_kw_arg and self._named_kw_args:
+                # remove all unamed kw:
+                copy = dict()
+                for name in self._named_kw_args:
+                    if name in kw:
+                        copy[name] = kw[name]
+                kw = copy
+            # check named arg:
+            for k, v in request.match_info.items():
+                if k in kw:
+                    logging.warning('Duplicate arg name in named arg and kw args: %s' % k)
+                kw[k] = v
 
-        # 4.判断参数名里有么有request，有的话，把request的值传入
-        params = inspect.signature(self.fn).parameters
-        for name, param in params.items():
-            if name == 'request':
-                kw['request'] = request
+        #3.2.5 如果handler函数有参数名为request，则把add_route传给__call__的request放入kw
+        if self._has_request_arg:
+            kw['request'] = request
 
-        # 5. 把参数kw传入，调用URI函数
-        r = await self.fn(**kw) #kw是dict则是两个**作为关键字参数
-        return r
+        #3.2.6 如果有必须传值的参数，可是在kw中却找不到对应的值则报错
+        if self._required_kw_args:
+            for name in self._required_kw_args:
+                if not name in kw:
+                    return web.HTTPBadRequest('Missing argument: %s' % name)
+        logging.info('call with args: %s' % str(kw))
+        try:
+            #3.2.7 把kw作为参数传入，调用handler函数，返回函数返回值。
+            #注意：因为kw是字典，所以传入需要两个*
+            #注意：这里要用await
+            r = await self._func(**kw)
+            return r
+        # except APIError as e:
+        #     return dict(error=e.error, data=e.data, message=e.message)
+        except Exception as e:
+            return dict(error=e.error, data=e.data, message=e.message)
+
+#RequestHandler class end
 
 async def init(loop):
     app = web.Application(loop=loop)
@@ -128,6 +235,3 @@ async def init(loop):
 loop = asyncio.get_event_loop()
 loop.run_until_complete(init(loop))
 loop.run_forever()
-
-
-
