@@ -108,6 +108,7 @@ async def response_factory(app, handler):
 async def init(loop):
     app = web.Application(loop=loop, middlewares=[response_factory])#response_factory指定返回类型
     add_routes(app,'handlers')
+    add_static(app)
     srv = await loop.create_server(app.make_handler(), '127.0.0.1', 9000)
     print('Server started at http://127.0.0.1:9000...')
     return srv
